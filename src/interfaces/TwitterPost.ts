@@ -7,6 +7,11 @@ export interface TwitterPost {
   user: TwitterUser;
   createdAt?: Dayjs;
   fullText?: string;
+  /** 清理后的推文文字：长推文补全、去掉末尾媒体短链、短链展开 */
+  text?: string;
+  conversationId?: string;
+  inReplyToPostId?: string;
+  inReplyToScreenName?: string;
   tags?: string[];
   views?: number;
   lang?: string;

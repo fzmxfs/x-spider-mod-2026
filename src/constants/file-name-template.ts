@@ -16,6 +16,10 @@ export const EXAMPLE_USER: Required<TwitterUser> = {
   id: '1145141919',
   mediaCount: 8888,
   registerTime: dayjs('2024-01-01'),
+  banner: 'https://pbs.twimg.com/profile_banners/1145141919/1700000000',
+  description: '这是用户简介',
+  followersCount: 1234,
+  friendsCount: 56,
 };
 
 export const EXAMPLE_POST: Required<TwitterPost> = {
@@ -28,6 +32,10 @@ export const EXAMPLE_POST: Required<TwitterPost> = {
   favorited: false,
   fullText:
     '这里是推文内容,这里是推文内容，这里是推文内容，这里是推文内容，这里是推文内容，这里是推文内容。',
+  text: '这里是推文内容,这里是推文内容，这里是推文内容，这里是推文内容，这里是推文内容，这里是推文内容。',
+  conversationId: '1145141919810',
+  inReplyToPostId: '',
+  inReplyToScreenName: '',
   lang: 'ja',
   possiblySensitive: false,
   replyCount: 21,

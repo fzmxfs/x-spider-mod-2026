@@ -30,6 +30,10 @@ import { TwitterUser } from '../../interfaces/TwitterUser';
 import MediaType from '../../enums/MediaType';
 import { notification as tauriNotification, shell } from '@tauri-apps/api';
 import dayjs, { Dayjs } from 'dayjs';
+import {
+  appendFailedAccountsLog,
+  removeFailedAccountsLog,
+} from '../../utils/failed-accounts-log';
 
 const { Title, Text } = Typography;
 
@@ -222,6 +226,7 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
           successCount: (latest?.successCount || 0) + 1,
           logs: trimLogs(completed),
         });
+        removeFailedAccountsLog([account]);
 
         await new Promise((resolve) => setTimeout(resolve, 1000));
       } catch (err: any) {
@@ -236,6 +241,7 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
           failCount: (latest2?.failCount || 0) + 1,
           logs: trimLogs(failed),
         });
+        appendFailedAccountsLog([{ account, reason: err.message }]);
 
         notification.warning({
           message: `账户 ${account} 下载失败`,
@@ -384,6 +390,7 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
           failCount: Math.max((latest?.failCount || 0) - 1, 0),
           logs: trimLogs(logsRef.current),
         });
+        removeFailedAccountsLog([account]);
         notification.success({
           message: `@${account} 重新验证成功`,
           description: '已创建下载任务',
@@ -393,6 +400,7 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
           `[${dayjs().format('HH:mm:ss')}]  @${account} 重新验证失败: ${err.message}`,
         );
         updateBatchDownloadProgress({ logs: trimLogs(logsRef.current) });
+        appendFailedAccountsLog([{ account, reason: err.message }]);
         notification.warning({
           message: `账户 ${account} 重新验证失败`,
           description: err.message,
@@ -973,6 +981,13 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
                       }}
                     >
                       失败 ({failedAccounts.length})
+                    </Text>
+                    <Text
+                      type="secondary"
+                      style={{ fontSize: 11 }}
+                      title="失败账户会记到程序数据目录下的 下载失败用户.txt，跟下载路径无关；重新验证成功后会自动从文件里移除"
+                    >
+                      （已同步到 下载失败用户.txt）
                     </Text>
                   </div>
                   <Button
