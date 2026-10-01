@@ -91,8 +91,7 @@ export async function getAccountInfo(
   const nameMatch = html.match(/"screen_name":"(.*?)"/);
   if (nameMatch === null) throw new Error('Cannot find name in response');
 
-  const avatarMatch = html.match(/
-"profile_image_url_https":"(.*?)"/);
+  const avatarMatch = html.match(/"profile_image_url_https":"(.*?)"/);
   if (avatarMatch === null) throw new Error('Cannot find avatar in response');
 
   return {
