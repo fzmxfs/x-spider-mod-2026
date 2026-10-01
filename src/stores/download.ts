@@ -37,21 +37,22 @@ function log() {
 // 这样推文文字/头像会和它对应的媒体文件存在同一个目录下。
 async function resolvePostDir(
   post: TwitterPost,
-  media: TwitterMedia,
+  media?: TwitterMedia,
 ): Promise<string> {
   const settings = useSettingsStore.getState();
   const bloggerName = post.user.screenName;
   const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
-  const templateData: FileNameTemplateData = { media, post };
-  if (settings.download.folderMode === 'template') {
-    return settings.download.dirTemplate
-      ? await path.join(
-          settings.download.saveDirBase,
-          resolveVariables(settings.download.dirTemplate, templateData),
-        )
-      : settings.download.saveDirBase;
+  // 无媒体推文没有可用的媒体模板字段，无法用“按模板”模式解析，回退到博主目录
+  if (!media || settings.download.folderMode !== 'template') {
+    return await path.join(settings.download.saveDirBase, safeBloggerName);
   }
-  return await path.join(settings.download.saveDirBase, safeBloggerName);
+  const templateData: FileNameTemplateData = { media, post };
+  return settings.download.dirTemplate
+    ? await path.join(
+        settings.download.saveDirBase,
+        resolveVariables(settings.download.dirTemplate, templateData),
+      )
+    : settings.download.saveDirBase;
 }
 
 export interface CreateDownloadTaskParams {
@@ -436,9 +437,37 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
   },
 }));
 
-async function runCreationTask(task: CreationTask, abortSignal: AbortSignal) {
+/**
+ * 单账户完整下载流程的返回值：
+ * - downloaded：实际下载的媒体文件数
+ * - skipped：跳过的媒体数（已存在/类型不匹配等）
+ * - metadataSaved：保存的推文文字 JSON 条数（含无媒体推文）
+ * - empty：是否完全没有任何产出（接口抽风或账户真的没有可下载内容）
+ */
+export interface RunCreationTaskResult {
+  downloaded: number;
+  skipped: number;
+  metadataSaved: number;
+  empty: boolean;
+}
+
+/**
+ * 真正执行一个用户的抓取 + 下载：
+ * 1. 受保护（私密）账户直接抛错，进失败清单（关注后重试）；
+ * 2. 无媒体推文也保存文字 JSON（metadata），不丢掉；
+ * 3. 整个流程零产出时整体重试最多 3 轮，避免接口抽风返回空被当成“完成”。
+ */
+export async function runCreationTask(
+  task: CreationTask,
+  abortSignal: AbortSignal,
+): Promise<RunCreationTaskResult> {
   log().info('Run creation task', task);
   const { filter, user } = task;
+
+  // 受保护（私密）账户：非粉丝拿不到其时间线，直接判失败，关注后重试
+  if (user.protected) {
+    throw new Error('账户受保护（private），需关注后才能下载');
+  }
 
   const { batchCreateDownloadTask, updateCreationTask } =
     useDownloadStore.getState();
@@ -446,6 +475,7 @@ async function runCreationTask(task: CreationTask, abortSignal: AbortSignal) {
 
   let completeCount = 0;
   let skipCount = 0;
+  let metadataSaved = 0;
 
   let now = dayjs();
   const since = filter.dateRange?.[0] || dayjs.unix(0);
@@ -458,136 +488,163 @@ async function runCreationTask(task: CreationTask, abortSignal: AbortSignal) {
     return acc + (elem.medias?.length || 0);
   }, 0);
 
-  while (nextCursor !== null && now.isAfter(since)) {
-    if (abortSignal.aborted) {
-      return;
-    }
-
-    // 批量下载场景下响应「暂停」：在翻页间隙挂起，暂停期间不再继续抓取时间线
-    if (batchRunControl.isRunning) {
-      while (batchRunControl.isPaused && batchRunControl.isRunning) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
+  // 零产出时整体重试（应对接口抽风返回空），最多 3 轮
+  for (let attempt = 0; attempt < 3; attempt++) {
+    while (nextCursor !== null && now.isAfter(since)) {
       if (abortSignal.aborted) {
-        return;
+        break;
       }
-    }
 
-    log().info('CreationTask fetching', nextCursor);
-    const { twitterPosts, cursor } = await getListFn(user.id, nextCursor);
-    if (abortSignal.aborted) break;
-    nextCursor = cursor;
-    now = R.last(twitterPosts)?.createdAt || now;
-    log().info('Now', now.format('YYYY-MM-DD'), 'next cursor', nextCursor);
-    const filteredPosts = twitterPosts.filter(
-      R.allPass([
-        (post) => Boolean(post.medias && post.medias.length > 0),
-        (post) => {
-          if (!post.createdAt) return true;
-          return until ? post.createdAt.isBefore(until) : true;
-        },
-        (post) => {
-          if (!post.createdAt) return true;
-          return since ? post.createdAt.isAfter(since) : true;
-        },
-      ]),
-    );
+      // 批量下载场景下响应「暂停」：在翻页间隙挂起，暂停期间不再继续抓取时间线
+      if (batchRunControl.isRunning) {
+        while (batchRunControl.isPaused && batchRunControl.isRunning) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        if (abortSignal.aborted) {
+          break;
+        }
+      }
 
-    const filteredCount =
-      getMediaCounts(twitterPosts) - getMediaCounts(filteredPosts);
-    skipCount += filteredCount;
-    log().info('FilteredPosts', filteredPosts);
+      log().info('CreationTask fetching', nextCursor);
+      const { twitterPosts, cursor } = await getListFn(user.id, nextCursor);
+      if (abortSignal.aborted) break;
+      nextCursor = cursor;
+      now = R.last(twitterPosts)?.createdAt || now;
+      log().info('Now', now.format('YYYY-MM-DD'), 'next cursor', nextCursor);
 
-    if (filteredPosts.length === 0) {
-      updateCreationTask({
-        ...task,
-        completeCount,
-        skipCount,
-      });
-      continue;
-    }
-
-    const paramsList: CreateDownloadTaskParams[] = [];
-    const postsToSaveMetadata: { post: TwitterPost; dirKey: string }[] = [];
-
-    for (const post of filteredPosts) {
-      const filteredMedias = post.medias!.filter(
+      // 仅按日期过滤；无媒体推文也保留（要存文字 JSON）
+      const filteredPosts = twitterPosts.filter(
         R.allPass([
-          (media) => {
-            if (!filter.mediaTypes) return false;
-            return filter.mediaTypes.includes(media.type);
+          (post) => {
+            if (!post.createdAt) return true;
+            return until ? post.createdAt.isBefore(until) : true;
+          },
+          (post) => {
+            if (!post.createdAt) return true;
+            return since ? post.createdAt.isAfter(since) : true;
           },
         ]),
       );
 
-      log().info('FilteredMedias', filteredMedias);
-      if (filteredMedias.length > 0) {
-        const dir = await resolvePostDir(post, filteredMedias[0]);
+      const filteredCount =
+        getMediaCounts(twitterPosts) - getMediaCounts(filteredPosts);
+      skipCount += filteredCount;
+      log().info('FilteredPosts', filteredPosts);
+
+      if (filteredPosts.length === 0) {
+        updateCreationTask({
+          ...task,
+          completeCount,
+          skipCount,
+        });
+        continue;
+      }
+
+      const paramsList: CreateDownloadTaskParams[] = [];
+      const postsToSaveMetadata: { post: TwitterPost; dirKey: string }[] = [];
+
+      for (const post of filteredPosts) {
+        // 无论有无媒体，都保存文字 JSON；目录按博主名（无媒体推文回退博主目录）
+        const dir = await resolvePostDir(post, post.medias?.[0]);
         postsToSaveMetadata.push({ post, dirKey: dir });
-      }
-      for (const media of filteredMedias) {
-        const task = await prepareDownloadTask({ post, media });
-        log().info('Prepared download task', task);
-        const filePath = await path.join(task.dir, task.fileName);
-        log().info('Resolved file path', filePath);
-        if (settings.download.sameFileSkip && (await fs.exists(filePath))) {
-          skipCount++;
-          log().info('Skip because sameFileSkip', media);
-          continue;
-        }
-        paramsList.push({
-          media,
-          post,
-        });
-      }
-    }
 
-    // 保存推文文字等信息（即使媒体文件已存在被跳过，也会补写文字）
-    // 按“解析出的目录”分组：同一目录下的推文合并成一批写入，
-    // 同时避开自定义模板下可能出现的按博主之外维度分目录的情况。
-    for (const [dirKey, group] of Object.entries(
-      R.groupBy((x: { dirKey: string }) => x.dirKey, postsToSaveMetadata),
-    )) {
-      if (!group || group.length === 0) continue;
-      const posts = group.map((g) => g.post);
-      const r = await savePostMetadata(dirKey, posts);
-      log().info('Saved post metadata', dirKey, r);
-      if (r.failed > 0) {
-        log().error('Save post metadata failed', dirKey, r.firstError);
-      }
-      // 头像和横幅：只在“每个博主一个文件夹”模式下保存（按模板分目录时，
-      // 同一目录可能混有多个博主的推文，保存头像意义不明确，故跳过）。
-      // 后台进行、不等待，失败也不影响下载。
-      if (settings.download.folderMode !== 'template') {
-        saveUserImages(dirKey, posts[0].user).then((errs) => {
-          if (errs.length > 0) {
-            log().warn('Save user images failed', dirKey, errs);
+        const filteredMedias = (post.medias || []).filter(
+          R.allPass([
+            (media) => {
+              if (!filter.mediaTypes) return false;
+              return filter.mediaTypes.includes(media.type);
+            },
+          ]),
+        );
+
+        log().info('FilteredMedias', filteredMedias);
+        for (const media of filteredMedias) {
+          const downloadTask = await prepareDownloadTask({ post, media });
+          log().info('Prepared download task', downloadTask);
+          const filePath = await path.join(
+            downloadTask.dir,
+            downloadTask.fileName,
+          );
+          log().info('Resolved file path', filePath);
+          if (
+            settings.download.sameFileSkip &&
+            (await fs.exists(filePath))
+          ) {
+            skipCount++;
+            log().info('Skip because sameFileSkip', media);
+            continue;
           }
-        });
+          paramsList.push({
+            media,
+            post,
+          });
+        }
       }
-    }
 
-    log().info('Params', paramsList);
+      // 保存推文文字等信息（含无媒体推文；即使媒体已存在被跳过，也会补写文字）
+      // 按“解析出的目录”分组：同一目录下的推文合并成一批写入
+      for (const [dirKey, group] of Object.entries(
+        R.groupBy((x: { dirKey: string }) => x.dirKey, postsToSaveMetadata),
+      )) {
+        if (!group || group.length === 0) continue;
+        const posts = group.map((g) => g.post);
+        const r = await savePostMetadata(dirKey, posts);
+        log().info('Saved post metadata', dirKey, r);
+        metadataSaved += r.saved;
+        if (r.failed > 0) {
+          log().error('Save post metadata failed', dirKey, r.firstError);
+        }
+        // 头像和横幅：只在“每个博主一个文件夹”模式下保存（按模板分目录时，
+        // 同一目录可能混有多个博主的推文，保存头像意义不明确，故跳过）。
+        // 后台进行、不等待，失败也不影响下载。
+        if (settings.download.folderMode !== 'template') {
+          saveUserImages(dirKey, posts[0].user).then((errs) => {
+            if (errs.length > 0) {
+              log().warn('Save user images failed', dirKey, errs);
+            }
+          });
+        }
+      }
 
-    if (paramsList.length === 0) {
+      log().info('Params', paramsList);
+
+      if (paramsList.length === 0) {
+        updateCreationTask({
+          ...task,
+          completeCount,
+          skipCount,
+        });
+        continue;
+      }
+
+      await batchCreateDownloadTask(paramsList);
+      completeCount += paramsList.length;
       updateCreationTask({
         ...task,
         completeCount,
         skipCount,
       });
-      continue;
+
+      if (abortSignal.aborted) break;
     }
 
-    await batchCreateDownloadTask(paramsList);
-    completeCount += paramsList.length;
-    updateCreationTask({
-      ...task,
-      completeCount,
-      skipCount,
-    });
+    // 有产出或已中止则结束
+    if (completeCount > 0 || metadataSaved > 0 || abortSignal.aborted) break;
 
-    if (abortSignal.aborted) break;
+    // 零产出：等待 3 秒后整体重试（重置游标与时间基准）
+    if (attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      nextCursor = undefined;
+      now = dayjs();
+    }
   }
+
+  return {
+    downloaded: completeCount,
+    skipped: skipCount,
+    metadataSaved,
+    empty: completeCount === 0 && metadataSaved === 0,
+  };
 }
 
 // Schedules creation tasks

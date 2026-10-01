@@ -24,12 +24,17 @@ import {
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { useBatchListStore, batchRunControl } from '../../stores/batch-list';
 import { BatchList } from '../../interfaces/BatchList';
-import { useDownloadStore } from '../../stores/download';
+import {
+  useDownloadStore,
+  runCreationTask,
+} from '../../stores/download';
 import { getUser } from '../../twitter/api';
 import { TwitterUser } from '../../interfaces/TwitterUser';
+import { CreationTask } from '../../interfaces/CreationTask';
 import MediaType from '../../enums/MediaType';
 import { notification as tauriNotification, shell } from '@tauri-apps/api';
 import dayjs, { Dayjs } from 'dayjs';
+import { nanoid } from 'nanoid';
 import {
   appendFailedAccountsLog,
   removeFailedAccountsLog,
@@ -84,7 +89,6 @@ function trimAccounts(accounts: string[]): { shown: string[]; hidden: number } {
 export const BatchListProgress: React.FC<BatchListProgressProps> = ({
   list,
 }) => {
-  const { createCreationTask } = useDownloadStore();
   const {
     updateLastUsedTime,
     batchDownloadProgress,
@@ -103,6 +107,7 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
   );
 
   const logsRef = useRef<string[]>([]);
+  const batchAbortRef = useRef<AbortController | null>(null);
 
   const [verifyingFailed, setVerifyingFailed] = useState(false);
 
@@ -170,8 +175,11 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
       dateRange: effectiveDateRange,
     });
 
+    const batchAbort = new AbortController();
+    batchAbortRef.current = batchAbort;
+
     for (let i = 0; i < list.accounts.length; i++) {
-      if (!batchRunControl.isRunning) {
+      if (!batchRunControl.isRunning || batchAbort.signal.aborted) {
         logsRef.current.push(`[${dayjs().format('HH:mm:ss')}] 下载已停止`);
         updateBatchDownloadProgress({ logs: trimLogs(logsRef.current) });
         break;
@@ -181,7 +189,7 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
-      if (!batchRunControl.isRunning) {
+      if (!batchRunControl.isRunning || batchAbort.signal.aborted) {
         logsRef.current.push(`[${dayjs().format('HH:mm:ss')}] 下载已停止`);
         updateBatchDownloadProgress({ logs: trimLogs(logsRef.current) });
         break;
@@ -200,6 +208,11 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
       try {
         const user: TwitterUser = await getUser(account);
 
+        // 受保护（私密）账户：直接判失败并进失败清单，关注后重试
+        if (user.protected) {
+          throw new Error('账户受保护（private），需关注后才能下载');
+        }
+
         const mediaTypes = buildMediaTypes(list.filter);
 
         const dr = effectiveDateRange
@@ -209,15 +222,32 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
             ] as [dayjs.Dayjs, dayjs.Dayjs])
           : undefined;
 
-        createCreationTask(user, {
-          mediaTypes,
-          source: list.filter.source,
-          dateRange: dr,
-        });
+        const task: CreationTask = {
+          id: nanoid(),
+          user,
+          filter: {
+            mediaTypes,
+            source: list.filter.source,
+            dateRange: dr,
+          },
+          status: 'active',
+          completeCount: 0,
+          skipCount: 0,
+        };
+
+        // 真正执行并等待下载完成（不再只是排队后计数）
+        const result = await runCreationTask(task, batchAbort.signal);
+
+        if (batchAbort.signal.aborted) break;
+
+        // 完全没有任何产出：判失败，可重试
+        if (result.empty) {
+          throw new Error('未获取到任何可下载内容（接口异常或账户无推文）');
+        }
 
         const completed = [
           ...logsRef.current,
-          `[${dayjs().format('HH:mm:ss')}] ✓ @${account} 任务已创建`,
+          `[${dayjs().format('HH:mm:ss')}] ✓ @${account} 下载完成（媒体 ${result.downloaded} / 文字 ${result.metadataSaved}）`,
         ];
         logsRef.current = completed;
         const latest = useBatchListStore.getState().batchDownloadProgress;
@@ -227,9 +257,8 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
           logs: trimLogs(completed),
         });
         removeFailedAccountsLog([account]);
-
-        await new Promise((resolve) => setTimeout(resolve, 1000));
       } catch (err: any) {
+        if (batchAbort.signal.aborted) break;
         const failed = [
           ...logsRef.current,
           `[${dayjs().format('HH:mm:ss')}]  @${account} 失败: ${err.message}`,
@@ -256,6 +285,7 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
     }
 
     batchRunControl.isRunning = false;
+    batchAbortRef.current = null;
     const done = [
       ...logsRef.current,
       `[${dayjs().format('HH:mm:ss')}] 批量下载完成！`,
@@ -269,7 +299,6 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
   }, [
     list,
     dateRange,
-    createCreationTask,
     updateBatchDownloadProgress,
     setBatchDownloadProgress,
     updateLastUsedTime,
@@ -301,6 +330,9 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
     if (batchRunControl.isRunning) {
       batchRunControl.isRunning = false;
       batchRunControl.isPaused = false;
+      // 中止正在执行中的账户下载
+      batchAbortRef.current?.abort();
+      batchAbortRef.current = null;
       const { creationTasks, removeCreationTask } = useDownloadStore.getState();
       for (const task of creationTasks) {
         removeCreationTask(task.id);
@@ -317,6 +349,8 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
   const handleReset = useCallback(() => {
     batchRunControl.isRunning = false;
     batchRunControl.isPaused = false;
+    batchAbortRef.current?.abort();
+    batchAbortRef.current = null;
     logsRef.current = [];
     setBatchDownloadProgress(null);
   }, [setBatchDownloadProgress]);
@@ -363,6 +397,8 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
     );
     updateBatchDownloadProgress({ logs: trimLogs(logsRef.current) });
 
+    const retryAbort = new AbortController();
+
     for (const account of [...failedAccounts]) {
       logsRef.current.push(
         `[${dayjs().format('HH:mm:ss')}] 正在重新验证 @${account}`,
@@ -371,14 +407,36 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
 
       try {
         const user: TwitterUser = await getUser(account);
-        createCreationTask(user, {
-          mediaTypes,
-          source: list.filter.source,
-          dateRange: dr,
-        });
+
+        // 受保护（私密）账户：仍然进失败清单，关注后重试
+        if (user.protected) {
+          throw new Error('账户受保护（private），需关注后才能下载');
+        }
+
+        const task: CreationTask = {
+          id: nanoid(),
+          user,
+          filter: {
+            mediaTypes,
+            source: list.filter.source,
+            dateRange: dr,
+          },
+          status: 'active',
+          completeCount: 0,
+          skipCount: 0,
+        };
+
+        // 真正下载完成后才算重新验证成功
+        const result = await runCreationTask(task, retryAbort.signal);
+
+        if (retryAbort.signal.aborted) break;
+
+        if (result.empty) {
+          throw new Error('未获取到任何可下载内容（接口异常或账户无推文）');
+        }
 
         logsRef.current.push(
-          `[${dayjs().format('HH:mm:ss')}] ✓ @${account} 重新验证成功，任务已创建`,
+          `[${dayjs().format('HH:mm:ss')}] ✓ @${account} 重新验证成功，下载完成（媒体 ${result.downloaded} / 文字 ${result.metadataSaved}）`,
         );
         const latest = useBatchListStore.getState().batchDownloadProgress;
         updateBatchDownloadProgress({
@@ -393,9 +451,10 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
         removeFailedAccountsLog([account]);
         notification.success({
           message: `@${account} 重新验证成功`,
-          description: '已创建下载任务',
+          description: '已下载完成',
         });
       } catch (err: any) {
+        if (retryAbort.signal.aborted) break;
         logsRef.current.push(
           `[${dayjs().format('HH:mm:ss')}]  @${account} 重新验证失败: ${err.message}`,
         );
@@ -420,7 +479,6 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
     verifyingFailed,
     dateRange,
     list,
-    createCreationTask,
     updateBatchDownloadProgress,
   ]);
 
