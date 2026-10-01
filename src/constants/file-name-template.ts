@@ -20,6 +20,7 @@ export const EXAMPLE_USER: Required<TwitterUser> = {
   description: '这是用户简介',
   followersCount: 1234,
   friendsCount: 56,
+  protected: false,
 };
 
 export const EXAMPLE_POST: Required<TwitterPost> = {
