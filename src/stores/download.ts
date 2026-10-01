@@ -382,6 +382,14 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
         const msg = '任务下载失败';
         const desc = `${newTask.fileName}\n${newTask.error || '未知原因'}`;
         log().error('Task download failed', newTask);
+        // 媒体文件 aria2 5 次重试耗尽仍失败：除了弹通知，也按博主账户记入失败清单，
+        // 之后重跑该账户即可补下缺失文件（已下载成功的会被 sameFileSkip 跳过）
+        appendFailedAccountsLog([
+          {
+            account: task.post.user.screenName,
+            reason: `媒体文件下载失败：${newTask.fileName}（${newTask.error || '未知原因'}）`,
+          },
+        ]);
         antNotification.error({
           message: msg,
           description: desc,
