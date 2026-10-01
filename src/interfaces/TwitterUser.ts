@@ -12,4 +12,6 @@ export interface TwitterUser {
   description?: string;
   followersCount?: number;
   friendsCount?: number;
+  /** 是否受保护（私密）账户 */
+  protected?: boolean;
 }

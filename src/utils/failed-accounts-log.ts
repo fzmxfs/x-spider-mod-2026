@@ -27,6 +27,7 @@ interface FailedEntry {
 /**
  * 根据错误信息粗略分类，写进文件第二列，方便一眼看出该不该重试：
  * - 账户不存在/不可用：账户名打错、已注销——重试没有意义
+ * - 账户受保护：私密账户，非粉丝无法下载——关注后重试
  * - 疑似账户受限：像是这个具体账户被封禁/保护/无权限查看——重试大概率还是不行，
  *   但不是 100% 确定，因为个别情况下也可能是权限判定有误
  * - Cookie 失效或受限：问题出在你的 Cookie/登录状态，不是这个账户本身——换一个
@@ -39,6 +40,8 @@ interface FailedEntry {
  */
 function classifyReason(reason: string): string {
   if (/找不到该用户|HTTP 404/.test(reason)) return '账户不存在或不可用';
+  if (/受保护|protected|private/.test(reason))
+    return '账户受保护（需关注后重试）';
   if (/HTTP 403/.test(reason)) return '疑似账户受限（可能不必重试）';
   if (/HTTP 401/.test(reason))
     return 'Cookie 失效或受限（换Cookie/等一等再试）';

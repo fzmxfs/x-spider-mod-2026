@@ -91,7 +91,8 @@ export async function getAccountInfo(
   const nameMatch = html.match(/"screen_name":"(.*?)"/);
   if (nameMatch === null) throw new Error('Cannot find name in response');
 
-  const avatarMatch = html.match(/"profile_image_url_https":"(.*?)"/);
+  const avatarMatch = html.match(/
+"profile_image_url_https":"(.*?)"/);
   if (avatarMatch === null) throw new Error('Cannot find avatar in response');
 
   return {
@@ -135,6 +136,8 @@ export async function getUser(screenName: string): Promise<TwitterUser> {
     throw new Error('找不到该用户');
   }
 
+  const result = R.path<any>(['data', 'user', 'result'])(resp.body);
+
   return {
     avatar: data?.profile_image_url_https,
     name: data?.name,
@@ -144,6 +147,7 @@ export async function getUser(screenName: string): Promise<TwitterUser> {
     ) as string,
     mediaCount: data?.media_count,
     registerTime: dayjs(data.created_at),
+    protected: Boolean(result?.protected),
   };
 }
 
@@ -482,13 +486,6 @@ export async function getUserTweets(
             R.isNotNil,
             // 过滤掉转推
             R.complement(R.hasPath(['legacy', 'retweeted_status_result'])),
-            // 过滤掉无媒体
-            R.hasPath(['legacy', 'entities', 'media']),
-            R.pathSatisfies(R.pipe(R.length, R.lte(0)), [
-              'legacy',
-              'entities',
-              'media',
-            ]),
           ]),
         ),
       )(instructions);
