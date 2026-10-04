@@ -240,14 +240,11 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
 
         if (batchAbort.signal.aborted) break;
 
-        // 完全没有任何产出：判失败，可重试
-        if (result.empty) {
-          throw new Error('未获取到任何可下载内容（接口异常或账户无推文）');
-        }
-
+        // 用户本身正常但没有推文/媒体：不再判失败，已创建说明文件，照常算完成
+        const emptyNote = result.empty ? '（无推文/媒体，已创建说明文件）' : '';
         const completed = [
           ...logsRef.current,
-          `[${dayjs().format('HH:mm:ss')}] ✓ @${account} 下载完成（媒体 ${result.downloaded} / 文字 ${result.metadataSaved}）`,
+          `[${dayjs().format('HH:mm:ss')}] ✓ @${account} 下载完成${emptyNote}（媒体 ${result.downloaded} / 文字 ${result.metadataSaved}）`,
         ];
         logsRef.current = completed;
         const latest = useBatchListStore.getState().batchDownloadProgress;
@@ -431,12 +428,10 @@ export const BatchListProgress: React.FC<BatchListProgressProps> = ({
 
         if (retryAbort.signal.aborted) break;
 
-        if (result.empty) {
-          throw new Error('未获取到任何可下载内容（接口异常或账户无推文）');
-        }
-
+        // 用户本身正常但没有推文/媒体：同样视为重新验证成功（已创建说明文件）
+        const emptyNote = result.empty ? '（无推文/媒体，已创建说明文件）' : '';
         logsRef.current.push(
-          `[${dayjs().format('HH:mm:ss')}] ✓ @${account} 重新验证成功，下载完成（媒体 ${result.downloaded} / 文字 ${result.metadataSaved}）`,
+          `[${dayjs().format('HH:mm:ss')}] ✓ @${account} 重新验证成功，下载完成${emptyNote}（媒体 ${result.downloaded} / 文字 ${result.metadataSaved}）`,
         );
         const latest = useBatchListStore.getState().batchDownloadProgress;
         updateBatchDownloadProgress({
