@@ -140,7 +140,8 @@ export async function getUser(screenName: string): Promise<TwitterUser> {
   return {
     avatar: data?.profile_image_url_https,
     name: data?.name,
-    screenName: data?.screen_name,
+    // 兜底：接口万一没返回 screen_name 时，用请求参数（列表里的用户名）代替
+    screenName: data?.screen_name ?? screenName,
     id: R.path<string>(['data', 'user', 'result', 'rest_id'])(
       resp.body,
     ) as string,
@@ -240,7 +241,9 @@ const mapTwitterPosts = (posts: any[]) => {
           item?.core?.user_results?.result?.legacy?.profile_image_url_https,
         mediaCount: item?.core?.user_results?.result?.legacy?.media_count,
         name: item?.core?.user_results?.result?.legacy?.name,
-        screenName: item?.core?.user_results?.result?.legacy?.screen_name,
+        screenName:
+          item?.core?.user_results?.result?.legacy?.screen_name ??
+          item?.core?.user_results?.result?.rest_id,
         registerTime: item?.core?.user_results?.result?.legacy?.created_at,
         banner: item?.core?.user_results?.result?.legacy?.profile_banner_url,
         description: item?.core?.user_results?.result?.legacy?.description,
