@@ -55,6 +55,33 @@ async function resolvePostDir(
     : settings.download.saveDirBase;
 }
 
+/**
+ * 用户本身正常（能找到、非受保护）但没有任何推文/媒体时调用：
+ * 创建该用户的文件夹，并写入一条说明文件，而不是当失败处理。
+ */
+async function writeNoContentNotice(user: TwitterUser): Promise<void> {
+  try {
+    const settings = useSettingsStore.getState();
+    const safeBloggerName = user.screenName.replace(/[\\/*?:"<>|]/g, '_');
+    const dir = await path.join(settings.download.saveDirBase, safeBloggerName);
+    if (!(await fs.exists(dir))) {
+      await fs.createDir(dir, { recursive: true });
+    }
+    const noticeFile = await path.join(dir, '无推文或媒体说明.txt');
+    const lines = [
+      `账户：@${user.screenName}`,
+      `检查时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`,
+      '',
+      '该用户当前没有可下载的推文或媒体内容。',
+      '可能原因：1. 用户确实没有发布过推文/媒体；2. 内容已删除；3. 接口暂时异常未取到（可重新下载再确认）。',
+    ];
+    await fs.writeTextFile(noticeFile, lines.join('\n') + '\n');
+    log().info('Wrote no-content notice', noticeFile);
+  } catch (err) {
+    log().warn('Write no-content notice failed', err);
+  }
+}
+
 export interface CreateDownloadTaskParams {
   post: TwitterPost;
   media: TwitterMedia;
@@ -450,7 +477,7 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
  * - downloaded：实际下载的媒体文件数
  * - skipped：跳过的媒体数（已存在/类型不匹配等）
  * - metadataSaved：保存的推文文字 JSON 条数（含无媒体推文）
- * - empty：是否完全没有任何产出（接口抽风或账户真的没有可下载内容）
+ * - empty：是否完全没有任何产出（用户正常但无推文/媒体，或接口异常）
  */
 export interface RunCreationTaskResult {
   downloaded: number;
@@ -463,7 +490,8 @@ export interface RunCreationTaskResult {
  * 真正执行一个用户的抓取 + 下载：
  * 1. 受保护（私密）账户直接抛错，进失败清单（关注后重试）；
  * 2. 无媒体推文也保存文字 JSON（metadata），不丢掉；
- * 3. 整个流程零产出时整体重试最多 3 轮，避免接口抽风返回空被当成“完成”。
+ * 3. 整个流程零产出时整体重试最多 3 轮；若仍为空且用户本身正常，
+ *    创建该用户文件夹并写入“无推文或媒体说明.txt”，不判失败。
  */
 export async function runCreationTask(
   task: CreationTask,
@@ -645,6 +673,12 @@ export async function runCreationTask(
       nextCursor = undefined;
       now = dayjs();
     }
+  }
+
+  // 用户本身正常（已通过 getUser 且非受保护）但确实零产出：不判失败，
+  // 创建该用户文件夹并写入说明文件，方便事后核对（也可据此判断是否接口异常）。
+  if (completeCount === 0 && metadataSaved === 0 && !abortSignal.aborted) {
+    await writeNoContentNotice(user);
   }
 
   return {
