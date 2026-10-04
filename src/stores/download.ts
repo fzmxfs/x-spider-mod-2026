@@ -40,8 +40,9 @@ async function resolvePostDir(
   media?: TwitterMedia,
 ): Promise<string> {
   const settings = useSettingsStore.getState();
-  const bloggerName = post.user.screenName;
-  const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
+  // 兜底：极端情况下推文里的用户信息缺失时，用用户 ID 代替，避免 undefined.replace 报错
+  const bloggerName = post.user.screenName || post.user.id || 'unknown';
+  const safeBloggerName = bloggerName.replace(/[\/*?:"<>|]/g, '_');
   // 无媒体推文没有可用的媒体模板字段，无法用“按模板”模式解析，回退到博主目录
   if (!media || settings.download.folderMode !== 'template') {
     return await path.join(settings.download.saveDirBase, safeBloggerName);
@@ -62,14 +63,18 @@ async function resolvePostDir(
 async function writeNoContentNotice(user: TwitterUser): Promise<void> {
   try {
     const settings = useSettingsStore.getState();
-    const safeBloggerName = user.screenName.replace(/[\\/*?:"<>|]/g, '_');
+    // 兜底：接口万一没返回 screenName 时用用户 ID，避免 undefined.replace 报错
+    const safeBloggerName = (user.screenName || user.id || 'unknown').replace(
+      /[\/*?:"<>|]/g,
+      '_',
+    );
     const dir = await path.join(settings.download.saveDirBase, safeBloggerName);
     if (!(await fs.exists(dir))) {
       await fs.createDir(dir, { recursive: true });
     }
     const noticeFile = await path.join(dir, '无推文或媒体说明.txt');
     const lines = [
-      `账户：@${user.screenName}`,
+      `账户：@${user.screenName || user.id || 'unknown'}`,
       `检查时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`,
       '',
       '该用户当前没有可下载的推文或媒体内容。',
@@ -119,8 +124,9 @@ async function prepareDownloadTask({
   // ==============================================
   // 核心修改：自动获取博主用户名并创建文件夹
   // ==============================================
-  const bloggerName = post.user.screenName;
-  const safeBloggerName = bloggerName.replace(/[\\/*?:"<>|]/g, '_');
+  // 兜底：极端情况下推文里的用户信息缺失时，用用户 ID 代替，避免 undefined.replace 报错
+  const bloggerName = post.user.screenName || post.user.id || 'unknown';
+  const safeBloggerName = bloggerName.replace(/[\/*?:"<>|]/g, '_');
 
   const templateData: FileNameTemplateData = {
     media,
